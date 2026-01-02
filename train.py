@@ -65,7 +65,7 @@ def parse_args():
     parser.add_argument('--img_size', type=int, default=224, help='Input image size')
 
     # --- 模型相关 ---
-    parser.add_argument('--model_type', type=str, default='base', choices=['base', 'improved'], help='Model architecture type')
+    parser.add_argument('--model_type', type=str, default='improved', choices=['base', 'improved'], help='Model architecture type')
     parser.add_argument('--pretrained', action='store_true', default=True, help='Use pretrained backbone')
 
     # --- 训练相关 ---

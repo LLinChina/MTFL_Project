@@ -13,19 +13,23 @@ class WingLoss(nn.Module):
     Wing Loss for robust facial landmark detection
     论文: Wing Loss for Robust Facial Landmark Localisation with Convolutional Neural Networks (CVPR 2018)
     """
-    def __init__(self, omega=10, epsilon=2):
+    def __init__(self, w=10.0, epsilon=2.0):
         super(WingLoss, self).__init__()
-        self.omega = omega
+        self.w = w
         self.epsilon = epsilon
-        self.C = self.omega - self.omega * torch.log(torch.tensor(1.0 + self.omega / self.epsilon))
+        self.C = self.w - self.w * torch.log(torch.tensor(1.0 + self.w / self.epsilon))
 
     def forward(self, pred, target):
-        diff = torch.abs(pred - target)
+        # 调整尺度，使Loss数值在合理范围
+        scale = 100.0
+        y_pred = pred * scale
+        y_true = target * scale
         
-        # Wing loss分段函数
+        diff = torch.abs(y_pred - y_true)
+        
         loss = torch.where(
-            diff < self.omega,
-            self.omega * torch.log(1 + diff / self.epsilon),
+            diff < self.w,
+            self.w * torch.log(1 + diff / self.epsilon),
             diff - self.C
         )
         
@@ -34,31 +38,20 @@ class WingLoss(nn.Module):
 
 class MultiTaskFaceNet(nn.Module):
     """
-    多任务人脸分析网络
-    - 共享主干网络提取特征
-    - 关键点检测分支（回归任务）
-    - 性别分类分支（分类任务）
+    基础版多任务网络 (Base)
     """
-
     def __init__(self, pretrained=True):
         super(MultiTaskFaceNet, self).__init__()
-
-        # 使用ResNet18作为主干网络
         resnet = models.resnet18(pretrained=pretrained)
-
-        # 提取除最后全连接层外的所有层作为特征提取器
         self.backbone = nn.Sequential(*list(resnet.children())[:-1])
 
-        # 关键点检测分支 (5个点，每个点2个坐标，共10个输出)
-        # 使用较深的网络，但dropout适中
         self.landmark_head = nn.Sequential(
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(True),
-            nn.Linear(256, 10)  # 输出10个坐标
+            nn.Linear(256, 10)
         )
 
-        # 性别分类分支 (二分类：Male/Female)
         self.gender_head = nn.Sequential(
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
@@ -68,42 +61,64 @@ class MultiTaskFaceNet(nn.Module):
         )
 
     def forward(self, x):
-        """
-        前向传播
-
-        Args:
-            x: 输入图像张量 (batch_size, 3, 224, 224)
-
-        Returns:
-            landmarks: 关键点预测 (batch_size, 10)
-            gender: 性别预测 logits (batch_size, 2)
-        """
-        # 特征提取
         features = self.backbone(x)
-        features = features.view(features.size(0), -1)  # (batch_size, 512)
+        features = features.view(features.size(0), -1)
+        return self.landmark_head(features), self.gender_head(features)
 
-        # 关键点预测
-        landmarks = self.landmark_head(features)
 
-        # 性别预测
-        gender = self.gender_head(features)
+class ImprovedMultiTaskFaceNet(nn.Module):
+    """
+    改进版多任务网络 (Improved)
+    特点：更深的任务分支 (Deep Heads)，缓解任务冲突
+    """
+    def __init__(self, pretrained=True):
+        super(ImprovedMultiTaskFaceNet, self).__init__()
+        
+        # 依然使用 ResNet18，但我们可以尝试解冻更多层或使用更强的预训练
+        resnet = models.resnet18(pretrained=pretrained)
+        self.backbone = nn.Sequential(*list(resnet.children())[:-1])
 
-        return landmarks, gender
+        # --- 改进点：加深关键点分支 ---
+        # 增加了一层 256 -> 128 的转换，让网络有更多参数去拟合几何变换
+        self.landmark_head = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(True),
+            nn.Dropout(0.2),      # 增加轻微Dropout防止过拟合
+            nn.Linear(256, 128),  # 新增层
+            nn.BatchNorm1d(128),
+            nn.ReLU(True),
+            nn.Linear(128, 10)
+        )
+
+        # --- 改进点：加深性别分支 ---
+        # 增加了一层，并保持较高的 Dropout，强迫网络学习鲁棒特征
+        self.gender_head = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(True),
+            nn.Dropout(0.5),
+            nn.Linear(256, 128),  # 新增层
+            nn.BatchNorm1d(128),
+            nn.ReLU(True),
+            nn.Dropout(0.5),
+            nn.Linear(128, 2)
+        )
+
+    def forward(self, x):
+        features = self.backbone(x)
+        features = features.view(features.size(0), -1)
+        return self.landmark_head(features), self.gender_head(features)
 
 
 def get_model(model_type='base', pretrained=True):
     """
     获取模型实例
-
-    Args: 
-        model_type: 模型类型 ('base' 或 'improved')
-        pretrained: 是否使用预训练权重
-
-    Returns: 
-        model: 模型实例
     """
     if model_type == 'base':
         return MultiTaskFaceNet(pretrained=pretrained)
+    elif model_type == 'improved':
+        return ImprovedMultiTaskFaceNet(pretrained=pretrained)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
