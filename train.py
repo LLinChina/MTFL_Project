@@ -7,13 +7,32 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 import numpy as np
+import math
 
 from model import get_model
 from utils import get_dataloaders, calculate_nme, AverageMeter
 
+# --- 新增 WingLoss ---
+class WingLoss(nn.Module):
+    def __init__(self, w=10.0, epsilon=2.0):
+        super(WingLoss, self).__init__()
+        self.w = w
+        self.epsilon = epsilon
+        self.C = w - w * math.log(1 + w / epsilon)
+
+    def forward(self, pred, target):
+        # 将归一化坐标放大，使WingLoss在合适的尺度工作
+        y_pred = pred * 224.0
+        y_true = target * 224.0
+        
+        diff = torch.abs(y_pred - y_true)
+        loss = torch.where(diff < self.w, 
+                           self.w * torch.log(1 + diff / self.epsilon), 
+                           diff - self.C)
+        return torch.mean(loss)
 
 def parse_args():
     """解析命令行参数"""
@@ -223,7 +242,7 @@ def main():
     model = model.to(device)
 
     # 定义损失函数
-    criterion_landmark = nn.SmoothL1Loss()  # 使用Smooth L1代替MSE，对异常值更鲁棒
+    criterion_landmark = WingLoss(w=10, epsilon=2)  # 使用WingLoss代替Smooth L1
     criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)  # 添加标签平滑
 
     # 定义优化器 - 使用AdamW和更优的参数
@@ -234,14 +253,8 @@ def main():
         betas=(0.9, 0.999)
     )
 
-    # 组合学习率调度器：先用余弦退火，再用ReduceLROnPlateau微调
-    scheduler_cosine = CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs,
-        eta_min=args.lr * 0.01
-    )
-    
-    scheduler_plateau = ReduceLROnPlateau(
+    # 学习率调度器：ReduceLROnPlateau微调
+    scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
         factor=0.5,
@@ -267,11 +280,8 @@ def main():
             device, args
         )
 
-        # 更新学习率 - 前30个epoch用余弦退火，之后用plateau
-        if epoch <= 30:
-            scheduler_cosine.step()
-        else:
-            scheduler_plateau.step(val_loss)
+        # 更新学习率
+        scheduler.step(val_loss)
         
         # 打印当前学习率
         current_lr = optimizer.param_groups[0]['lr']
