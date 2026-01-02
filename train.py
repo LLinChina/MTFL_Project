@@ -15,7 +15,29 @@ import math
 from model import get_model
 from utils import get_dataloaders, calculate_nme, AverageMeter
 
-# --- 新增 WingLoss ---
+
+# --- 不确定性加权多任务损失 (已激活) ---
+class MultiTaskLoss(nn.Module):
+    """基于不确定性的多任务损失自动加权"""
+    def __init__(self):
+        super().__init__()
+        # 初始化 log_sigma
+        # 性别任务简单但Loss小，给它更小的初始sigma(即更大的权重)
+        self.log_sigma_landmark = nn.Parameter(torch.tensor(2.0)) # 初始权重较小
+        self.log_sigma_gender = nn.Parameter(torch.tensor(-1.0))  # 初始权重较大
+    
+    def forward(self, loss_landmark, loss_gender):
+        # 精度 precision = 1 / (2 * sigma^2)
+        # Loss = precision * loss + log(sigma)
+        precision_landmark = 0.5 * torch.exp(-self.log_sigma_landmark)
+        precision_gender = 0.5 * torch.exp(-self.log_sigma_gender)
+        
+        total_loss = (precision_landmark * loss_landmark + 0.5 * self.log_sigma_landmark +
+                      precision_gender * loss_gender + 0.5 * self.log_sigma_gender)
+        return total_loss
+
+
+# --- WingLoss ---
 class WingLoss(nn.Module):
     def __init__(self, w=10.0, epsilon=2.0):
         super(WingLoss, self).__init__()
@@ -24,9 +46,10 @@ class WingLoss(nn.Module):
         self.C = w - w * math.log(1 + w / epsilon)
 
     def forward(self, pred, target):
-        # 将归一化坐标放大，使WingLoss在合适的尺度工作
-        y_pred = pred * 224.0
-        y_true = target * 224.0
+        # 降低放大倍数，防止Loss数值过大
+        scale = 100.0 
+        y_pred = pred * scale
+        y_true = target * scale
         
         diff = torch.abs(y_pred - y_true)
         loss = torch.where(diff < self.w, 
@@ -35,135 +58,90 @@ class WingLoss(nn.Module):
         return torch.mean(loss)
 
 def parse_args():
-    """解析命令行参数"""
     parser = argparse.ArgumentParser(description='Train Multi-Task Face Analysis Model')
-
-    # 数据相关
-    parser.add_argument('--data_root', type=str, default='./data',
-                        help='Path to data root directory')
-    parser.add_argument('--img_size', type=int, default=224,
-                        help='Input image size')
-
-    # 模型相关
-    parser.add_argument('--model_type', type=str, default='base',
-                        choices=['base', 'improved'],
-                        help='Model architecture type')
-    parser.add_argument('--pretrained', action='store_true', default=True,
-                        help='Use pretrained backbone')
-
-    # 训练相关
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size')
-    parser.add_argument('--epochs', type=int, default=80,
-                        help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.0005,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=5e-4,
-                        help='Weight decay')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
-
-    # 损失权重 - 增加性别分类任务的权重
-    parser.add_argument('--landmark_weight', type=float, default=0.8,
-                        help='Weight for landmark loss')
-    parser.add_argument('--gender_weight', type=float, default=1.5,
-                        help='Weight for gender loss')
-
-    # 保存相关
-    parser.add_argument('--save_dir', type=str, default='./checkpoints',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--save_freq', type=int, default=5,
-                        help='Save checkpoint every N epochs')
-
-    # 其他
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--device', type=str, default='cuda',
-                        help='Device to use')
-
+    parser.add_argument('--data_root', type=str, default='./data')
+    parser.add_argument('--img_size', type=int, default=224)
+    parser.add_argument('--model_type', type=str, default='base')
+    parser.add_argument('--pretrained', action='store_true', default=True)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=80)
+    parser.add_argument('--lr', type=float, default=0.0005)
+    parser.add_argument('--weight_decay', type=float, default=1e-3) # 增加正则化
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--save_freq', type=int, default=5)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--device', type=str, default='cuda')
+    # 注意：启用自动权重后，命令行传入的 landmark_weight 将失效
     return parser.parse_args()
 
 
 def set_seed(seed):
-    """设置随机种子"""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
 
 
 def train_one_epoch(model, train_loader, criterion_landmark, criterion_gender,
-                    optimizer, device, epoch, args):
+                    optimizer, device, epoch, args, multi_task_loss_layer):
     """训练一个epoch"""
     model.train()
+    # 确保权重层也在训练模式
+    multi_task_loss_layer.train()
 
-    # 创建指标记录器
     losses = AverageMeter()
     landmark_losses = AverageMeter()
     gender_losses = AverageMeter()
     gender_accs = AverageMeter()
 
-    # 进度条
     pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{args.epochs}')
 
     for images, landmarks, gender in pbar:
-        # 数据移至设备
         images = images.to(device)
         landmarks = landmarks.to(device)
         gender = gender.to(device)
-
         batch_size = images.size(0)
 
-        # 前向传播
         pred_landmarks, pred_gender = model(images)
 
-        # 计算损失
         loss_landmark = criterion_landmark(pred_landmarks, landmarks)
         loss_gender = criterion_gender(pred_gender, gender)
 
-        # 总损失（加权和）
-        loss = (args.landmark_weight * loss_landmark +
-                args.gender_weight * loss_gender)
+        # --- 核心修改：使用自动加权层计算总损失 ---
+        loss = multi_task_loss_layer(loss_landmark, loss_gender)
 
-        # 反向传播
         optimizer.zero_grad()
         loss.backward()
-        
-        # 梯度裁剪，防止梯度爆炸
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
         optimizer.step()
 
-        # 计算性别分类准确率
         _, gender_pred = torch.max(pred_gender, 1)
         gender_acc = (gender_pred == gender).float().mean().item() * 100
 
-        # 更新指标
         losses.update(loss.item(), batch_size)
         landmark_losses.update(loss_landmark.item(), batch_size)
         gender_losses.update(loss_gender.item(), batch_size)
         gender_accs.update(gender_acc, batch_size)
 
-        # 更新进度条
+        # 打印当前的自动权重 (1 / 2*exp(sigma))
+        w_lm = 0.5 * torch.exp(-multi_task_loss_layer.log_sigma_landmark).item()
+        w_gen = 0.5 * torch.exp(-multi_task_loss_layer.log_sigma_gender).item()
+
         pbar.set_postfix({
-            'loss': f'{losses.avg:.4f}',
-            'lm_loss': f'{landmark_losses.avg:.4f}',
-            'gen_loss': f'{gender_losses.avg:.4f}',
-            'gen_acc': f'{gender_accs.avg:.2f}%'
+            'L_lm': f'{landmark_losses.avg:.2f}',
+            'L_gen': f'{gender_losses.avg:.3f}',
+            'Acc': f'{gender_accs.avg:.1f}%',
+            'W_lm': f'{w_lm:.2f}', # 观察权重变化
+            'W_gen': f'{w_gen:.2f}'
         })
 
     return losses.avg, landmark_losses.avg, gender_losses.avg, gender_accs.avg
 
 
 def validate(model, test_loader, criterion_landmark, criterion_gender, device, args):
-    """验证模型"""
     model.eval()
-
     losses = AverageMeter()
-    landmark_losses = AverageMeter()
-    gender_losses = AverageMeter()
     gender_accs = AverageMeter()
-
-    # 用于计算NME
     all_pred_landmarks = []
     all_gt_landmarks = []
 
@@ -172,41 +150,28 @@ def validate(model, test_loader, criterion_landmark, criterion_gender, device, a
             images = images.to(device)
             landmarks = landmarks.to(device)
             gender = gender.to(device)
-
             batch_size = images.size(0)
 
-            # 前向传播
             pred_landmarks, pred_gender = model(images)
 
-            # 计算损失
             loss_landmark = criterion_landmark(pred_landmarks, landmarks)
             loss_gender = criterion_gender(pred_gender, gender)
-            loss = (args.landmark_weight * loss_landmark +
-                    args.gender_weight * loss_gender)
+            # 验证时简单求和即可，主要看指标
+            loss = loss_landmark + loss_gender
 
-            # 性别准确率
             _, gender_pred = torch.max(pred_gender, 1)
             gender_acc = (gender_pred == gender).float().mean().item() * 100
 
-            # 更新指标
             losses.update(loss.item(), batch_size)
-            landmark_losses.update(loss_landmark.item(), batch_size)
-            gender_losses.update(loss_gender.item(), batch_size)
             gender_accs.update(gender_acc, batch_size)
-
-            # 收集关键点用于计算NME
             all_pred_landmarks.append(pred_landmarks.cpu().numpy())
             all_gt_landmarks.append(landmarks.cpu().numpy())
 
-    # 计算NME
     all_pred_landmarks = np.concatenate(all_pred_landmarks, axis=0)
     all_gt_landmarks = np.concatenate(all_gt_landmarks, axis=0)
     nme = calculate_nme(all_pred_landmarks, all_gt_landmarks)
 
     print(f'\nValidation Results:')
-    print(f'  Loss: {losses.avg:.4f}')
-    print(f'  Landmark Loss: {landmark_losses.avg:.4f}')
-    print(f'  Gender Loss: {gender_losses.avg:.4f}')
     print(f'  Gender Accuracy: {gender_accs.avg:.2f}%')
     print(f'  NME: {nme:.6f}\n')
 
@@ -214,114 +179,60 @@ def validate(model, test_loader, criterion_landmark, criterion_gender, device, a
 
 
 def main():
-    """主训练函数"""
     args = parse_args()
-
-    # 设置随机种子
     set_seed(args.seed)
-
-    # 创建保存目录
     os.makedirs(args.save_dir, exist_ok=True)
-
-    # 设置设备
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
 
-    # 加载数据
     print('Loading data...')
-    train_loader, test_loader = get_dataloaders(
-        data_root=args.data_root,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        img_size=args.img_size
-    )
+    train_loader, test_loader = get_dataloaders(args.data_root, args.batch_size, args.num_workers, args.img_size)
 
-    # 创建模型
-    print(f'Creating {args.model_type} model.. .')
-    model = get_model(model_type=args.model_type, pretrained=args.pretrained)
-    model = model.to(device)
+    print(f'Creating {args.model_type} model...')
+    model = get_model(model_type=args.model_type, pretrained=args.pretrained).to(device)
 
-    # 定义损失函数
-    criterion_landmark = WingLoss(w=10, epsilon=2)  # 使用WingLoss代替Smooth L1
-    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)  # 添加标签平滑
+    # --- 初始化自动权重层 ---
+    multi_task_loss = MultiTaskLoss().to(device)
 
-    # 定义优化器 - 使用AdamW和更优的参数
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        betas=(0.9, 0.999)
-    )
+    criterion_landmark = WingLoss(w=10, epsilon=2)
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # 学习率调度器：ReduceLROnPlateau微调
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        min_lr=1e-7
-    )
+    # --- 将自动权重层的参数加入优化器 ---
+    optimizer = optim.AdamW([
+        {'params': model.parameters()},
+        {'params': multi_task_loss.parameters(), 'lr': args.lr * 5} # 让权重参数学习得快一点
+    ], lr=args.lr, weight_decay=args.weight_decay)
 
-    # 训练循环
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7)
+
     best_nme = float('inf')
     best_acc = 0.0
 
-    print('Starting training...')
+    print('Starting training with Automatic Loss Balancing...')
     for epoch in range(1, args.epochs + 1):
-        # 训练
-        train_loss, train_lm_loss, train_gen_loss, train_gen_acc = train_one_epoch(
+        train_loss, _, _, _ = train_one_epoch(
             model, train_loader, criterion_landmark, criterion_gender,
-            optimizer, device, epoch, args
+            optimizer, device, epoch, args, multi_task_loss # 传入权重层
         )
 
-        # 验证
         val_loss, val_nme, val_acc = validate(
             model, test_loader, criterion_landmark, criterion_gender,
             device, args
         )
 
-        # 更新学习率
         scheduler.step(val_loss)
         
-        # 打印当前学习率
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f'Current Learning Rate: {current_lr:.6f}')
-
-        # 保存最佳模型
         if val_nme < best_nme:
             best_nme = val_nme
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'nme': val_nme,
-                'acc': val_acc,
-            }, os.path.join(args.save_dir, 'best_nme_model.pth'))
+            torch.save(model.state_dict(), os.path.join(args.save_dir, 'best_nme_model.pth'))
             print(f'Saved best NME model (NME: {val_nme:.6f})')
 
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'nme': val_nme,
-                'acc': val_acc,
-            }, os.path.join(args.save_dir, 'best_acc_model.pth'))
+            torch.save(model.state_dict(), os.path.join(args.save_dir, 'best_acc_model.pth'))
             print(f'Saved best Accuracy model (Acc: {val_acc:.2f}%)')
 
-        # 定期保存检查点
-        if epoch % args.save_freq == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'nme': val_nme,
-                'acc': val_acc,
-            }, os.path.join(args.save_dir, f'checkpoint_epoch_{epoch}.pth'))
-
-    print('Training completed!')
-    print(f'Best NME: {best_nme:. 6f}')
+    print(f'Best NME: {best_nme:.6f}')
     print(f'Best Accuracy: {best_acc:.2f}%')
 
 
