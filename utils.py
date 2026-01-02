@@ -117,20 +117,28 @@ def get_transforms(is_train=True, img_size=224):
     """
     if is_train:
         transform = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
+            transforms.Resize((img_size + 32, img_size + 32)),  # 先放大
+            transforms.RandomCrop((img_size, img_size)),  # 随机裁剪
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ColorJitter(
-                brightness=0.3,
-                contrast=0.3,
-                saturation=0.3,
-                hue=0.1
+                brightness=0.4,  # 增强亮度变化
+                contrast=0.4,    # 增强对比度变化
+                saturation=0.4,  # 增强饱和度变化
+                hue=0.15         # 增强色调变化
             ),
-            transforms.RandomRotation(10),
+            transforms.RandomRotation(15),  # 增加旋转角度
+            transforms.RandomAffine(
+                degrees=0,
+                translate=(0.1, 0.1),  # 随机平移
+                scale=(0.9, 1.1)       # 随机缩放
+            ),
+            transforms.RandomGrayscale(p=0.1),  # 随机灰度化
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225]
-            )
+            ),
+            transforms.RandomErasing(p=0.3, scale=(0.02, 0.15))  # 随机擦除
         ])
     else:
         transform = transforms.Compose([

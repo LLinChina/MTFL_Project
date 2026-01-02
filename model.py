@@ -31,10 +31,16 @@ class MultiTaskFaceNet(nn.Module):
 
         # 关键点检测分支 (5个点，每个点2个坐标，共10个输出)
         self.landmark_head = nn.Sequential(
-            nn.Linear(feature_dim, 256),
+            nn.Linear(feature_dim, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.4),
             nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(128, 10)  # 5个关键点 × 2个坐标
@@ -42,13 +48,19 @@ class MultiTaskFaceNet(nn.Module):
 
         # 性别分类分支 (二分类：Male/Female)
         self.gender_head = nn.Sequential(
-            nn.Linear(feature_dim, 256),
+            nn.Linear(feature_dim, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
-            nn.Linear(256, 64),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.4),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(64, 2)  # 2个类别
+            nn.Linear(128, 2)  # 2个类别
         )
 
     def forward(self, x):

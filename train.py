@@ -35,19 +35,19 @@ def parse_args():
     # 训练相关
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size')
-    parser.add_argument('--epochs', type=int, default=50,
+    parser.add_argument('--epochs', type=int, default=80,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.001,
+    parser.add_argument('--lr', type=float, default=0.0005,
                         help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
+    parser.add_argument('--weight_decay', type=float, default=5e-4,
                         help='Weight decay')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
 
-    # 损失权重
-    parser.add_argument('--landmark_weight', type=float, default=1.0,
+    # 损失权重 - 增加性别分类任务的权重
+    parser.add_argument('--landmark_weight', type=float, default=0.8,
                         help='Weight for landmark loss')
-    parser.add_argument('--gender_weight', type=float, default=1.0,
+    parser.add_argument('--gender_weight', type=float, default=1.5,
                         help='Weight for gender loss')
 
     # 保存相关
@@ -108,6 +108,10 @@ def train_one_epoch(model, train_loader, criterion_landmark, criterion_gender,
         # 反向传播
         optimizer.zero_grad()
         loss.backward()
+        
+        # 梯度裁剪，防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
 
         # 计算性别分类准确率
@@ -219,22 +223,30 @@ def main():
     model = model.to(device)
 
     # 定义损失函数
-    criterion_landmark = nn.MSELoss()  # 关键点回归
-    criterion_gender = nn.CrossEntropyLoss()  # 性别分类
+    criterion_landmark = nn.SmoothL1Loss()  # 使用Smooth L1代替MSE，对异常值更鲁棒
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)  # 添加标签平滑
 
-    # 定义优化器
-    optimizer = optim.Adam(
+    # 定义优化器 - 使用AdamW和更优的参数
+    optimizer = optim.AdamW(
         model.parameters(),
         lr=args.lr,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        betas=(0.9, 0.999)
     )
 
-    # 学习率调度器
-    scheduler = ReduceLROnPlateau(
+    # 组合学习率调度器：先用余弦退火，再用ReduceLROnPlateau微调
+    scheduler_cosine = CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.lr * 0.01
+    )
+    
+    scheduler_plateau = ReduceLROnPlateau(
         optimizer,
         mode='min',
         factor=0.5,
         patience=5,
+        min_lr=1e-7
     )
 
     # 训练循环
@@ -255,8 +267,15 @@ def main():
             device, args
         )
 
-        # 更新学习率
-        scheduler.step(val_loss)
+        # 更新学习率 - 前30个epoch用余弦退火，之后用plateau
+        if epoch <= 30:
+            scheduler_cosine.step()
+        else:
+            scheduler_plateau.step(val_loss)
+        
+        # 打印当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Current Learning Rate: {current_lr:.6f}')
 
         # 保存最佳模型
         if val_nme < best_nme:
