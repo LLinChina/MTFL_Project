@@ -4,17 +4,19 @@
 """
 
 import os
+import random
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
-
+import torchvision.transforms.functional as F
 
 class MTFLDataset(Dataset):
     """
-    MTFL数据集类
+    MTFL数据集类 - 增强版 (包含几何变换坐标同步)
     """
 
     def __init__(self, data_root, annotation_file, transform=None, is_train=True):
@@ -40,25 +42,20 @@ class MTFLDataset(Dataset):
                 img_path = parts[0]
 
                 try:
-                    # --- 关键修改开始 ---
-                    # MTFL原始格式通常是: x1 x2 x3 x4 x5 y1 y2 y3 y4 y5
-                    # 我们需要将其重组为: x1 y1 x2 y2 x3 y3 x4 y4 x5 y5
+                    # 解析坐标 x1, x2... y1, y2...
                     raw_coords = [float(x) for x in parts[1:11]]
                     xs = raw_coords[0:5]
                     ys = raw_coords[5:10]
                     
+                    # 重组为 x1, y1, x2, y2...
                     landmarks = []
                     for x, y in zip(xs, ys):
                         landmarks.extend([x, y])
-                    # --- 关键修改结束 ---
                     
                     landmarks = np.array(landmarks, dtype=np.float32)
 
-                    # 性别标签 (通常在第12列，索引11)
-                    # MTFL属性: gender, smile, glasses, head_pose
+                    # 性别标签处理
                     gender = int(parts[11]) 
-                    # 假设原始标签: 1=Male, 2=Female (需根据实际数据集确认，这里沿用通用逻辑)
-                    # 转换为: 0=Male, 1=Female
                     gender = 0 if gender == 1 else 1
                     
                 except ValueError:
@@ -84,13 +81,61 @@ class MTFLDataset(Dataset):
         except Exception as e:
             return self.__getitem__((idx + 1) % len(self))
 
-        orig_width, orig_height = image.size
+        w, h = image.size
+        landmarks = sample['landmarks'].copy() # 原始像素坐标
 
-        # 关键点归一化 [0, 1]
-        landmarks = sample['landmarks'].copy()
-        # 现在的landmarks已经是 x1, y1, x2, y2... 格式
-        landmarks[0::2] = landmarks[0::2] / orig_width  # x
-        landmarks[1::2] = landmarks[1::2] / orig_height # y
+        # --- 核心：带坐标更新的几何增强 (仅训练时启用) ---
+        if self.is_train:
+            # 1. 随机旋转 (-15 ~ 15度)
+            if random.random() < 0.5: # 50%概率旋转
+                angle = random.uniform(-15, 15)
+                image = F.rotate(image, angle)
+                
+                # 坐标旋转数学公式
+                # 旋转中心是图片中心
+                cx, cy = w / 2, h / 2
+                # 角度转弧度 (注意：图像坐标系y轴向下，逆时针旋转需取反)
+                rad = math.radians(-angle) 
+                cos_a = math.cos(rad)
+                sin_a = math.sin(rad)
+                
+                new_lms = []
+                for i in range(0, 10, 2):
+                    px, py = landmarks[i], landmarks[i+1]
+                    # 平移到中心 -> 旋转 -> 平移回原位
+                    nx = (px - cx) * cos_a - (py - cy) * sin_a + cx
+                    ny = (px - cx) * sin_a + (py - cy) * cos_a + cy
+                    new_lms.extend([nx, ny])
+                landmarks = np.array(new_lms)
+
+            # 2. 随机缩放裁切 (Scale 0.85 ~ 1.0)
+            # 这模拟了人脸在图片中忽大忽小的情况，强迫模型学习尺度不变性
+            if random.random() < 0.5:
+                scale = random.uniform(0.85, 1.0)
+                new_w, new_h = int(w * scale), int(h * scale)
+                
+                # 随机选择左上角裁剪点
+                if w > new_w and h > new_h:
+                    dx = random.randint(0, w - new_w)
+                    dy = random.randint(0, h - new_h)
+                    
+                    image = F.crop(image, dy, dx, new_h, new_w)
+                    
+                    # 坐标更新：所有点减去偏移量
+                    landmarks[0::2] -= dx
+                    landmarks[1::2] -= dy
+                    
+                    # 更新当前宽高，用于后续归一化
+                    w, h = new_w, new_h
+
+        # --- 增强结束 ---
+
+        # 归一化 [0, 1]
+        landmarks[0::2] /= w
+        landmarks[1::2] /= h
+        
+        # 边界截断：防止增强后关键点跑出图片范围 (0~1之外)
+        landmarks = np.clip(landmarks, 0.0, 1.0)
 
         if self.transform:
             image = self.transform(image)
@@ -102,11 +147,13 @@ class MTFLDataset(Dataset):
 
 
 def get_transforms(is_train=True, img_size=224):
+    # 几何变换已经在 __getitem__ 里手动处理了
+    # 这里只做 Resize 和 颜色变换
     if is_train:
-        # 仅使用颜色增强，避免空间变换破坏关键点
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3),
+            # 颜色抖动：改变亮度、对比度、饱和度，防止模型死记硬背肤色
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4), 
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])

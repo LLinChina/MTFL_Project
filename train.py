@@ -59,63 +59,34 @@ class WingLoss(nn.Module):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Multi-Task Face Analysis Model')
-    parser.add_argument('--data_root', type=str, default='./data')
-    parser.add_argument('--img_size', type=int, default=224)
-    parser.add_argument('--model_type', type=str, default='base')
-    parser.add_argument('--pretrained', action='store_true', default=True)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=80)
-    parser.add_argument('--lr', type=float, default=0.0005)
-    parser.add_argument('--weight_decay', type=float, default=1e-3) # 增加正则化
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--save_dir', type=str, default='./checkpoints')
-    parser.add_argument('--save_freq', type=int, default=5)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--device', type=str, default='cuda')
-    # 注意：启用自动权重后，命令行传入的 landmark_weight 将失效
+    
+    # --- 数据相关 ---
+    parser.add_argument('--data_root', type=str, default='./data', help='Path to data root directory')
+    parser.add_argument('--img_size', type=int, default=224, help='Input image size')
 
-    # 数据相关
-    parser.add_argument('--data_root', type=str, default='./data',
-                        help='Path to data root directory')
-    parser.add_argument('--img_size', type=int, default=224,
-                        help='Input image size')
+    # --- 模型相关 ---
+    parser.add_argument('--model_type', type=str, default='base', choices=['base', 'improved'], help='Model architecture type')
+    parser.add_argument('--pretrained', action='store_true', default=True, help='Use pretrained backbone')
 
-    # 模型相关
-    parser.add_argument('--model_type', type=str, default='base',
-                        choices=['base', 'improved'],
-                        help='Model architecture type')
-    parser.add_argument('--pretrained', action='store_true', default=True,
-                        help='Use pretrained backbone')
+    # --- 训练相关 ---
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--epochs', type=int, default=80, help='Number of epochs')
+    parser.add_argument('--lr', type=float, default=0.0005, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='Weight decay')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
+    
+    # --- 保存与恢复 ---
+    parser.add_argument('--save_dir', type=str, default='./checkpoints', help='Directory to save checkpoints')
+    parser.add_argument('--save_freq', type=int, default=5, help='Save checkpoint every N epochs')
+    parser.add_argument('--resume', type=str, default='', help='path to latest checkpoint (default: none)')
 
-    # 训练相关
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size')
-    parser.add_argument('--epochs', type=int, default=80,
-                        help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.0003,
-                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
-                        help='Weight decay')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
-
-    # 损失权重 - 根据论文经验，landmark和gender基本平衡
-    parser.add_argument('--landmark_weight', type=float, default=1.0,
-                        help='Weight for landmark loss')
-    parser.add_argument('--gender_weight', type=float, default=1.0,
-                        help='Weight for gender loss')
-
-    # 保存相关
-    parser.add_argument('--save_dir', type=str, default='./checkpoints',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--save_freq', type=int, default=5,
-                        help='Save checkpoint every N epochs')
-
-    # 其他
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed')
-    parser.add_argument('--device', type=str, default='cuda',
-                        help='Device to use')
+    # --- 其他 ---
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use')
+    
+    # (可选保留，虽然现在用自动权重)
+    parser.add_argument('--landmark_weight', type=float, default=1.0, help='Weight for landmark loss')
+    parser.add_argument('--gender_weight', type=float, default=1.0, help='Weight for gender loss')
 
     return parser.parse_args()
 
@@ -242,48 +213,58 @@ def main():
     # --- 初始化自动权重层 ---
     multi_task_loss = MultiTaskLoss().to(device)
 
-    criterion_landmark = WingLoss(w=10, epsilon=2)
-    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
-    # 定义损失函数
-    # 使用Wing Loss for关键点检测 (CVPR 2018论文方法)
-    criterion_landmark = WingLoss(omega=10, epsilon=2)
-    # 性别分类使用标准交叉熵，添加标签平滑防止过拟合
+    # --- 定义损失函数 ---
+    # 修正：参数名是 w 不是 omega
+    criterion_landmark = WingLoss(w=10, epsilon=2) 
     criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # --- 将自动权重层的参数加入优化器 ---
+    # --- 定义优化器 ---
+    # 将自动权重层的参数加入优化器，并给予更高的学习率
     optimizer = optim.AdamW([
         {'params': model.parameters()},
-        {'params': multi_task_loss.parameters(), 'lr': args.lr * 5} # 让权重参数学习得快一点
+        {'params': multi_task_loss.parameters(), 'lr': args.lr * 5} 
     ], lr=args.lr, weight_decay=args.weight_decay)
 
+    # --- 定义学习率调度器 ---
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7)
 
-    # 定义优化器 - 使用Adam with较小学习率
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        betas=(0.9, 0.999)
-    )
-
-    # 学习率调度器 - 使用ReduceLROnPlateau
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=7,
-        min_lr=1e-6
-    )
-
-    # 训练循环
+    start_epoch = 1
     best_nme = float('inf')
     best_acc = 0.0
 
-    print('Starting training with Automatic Loss Balancing...')
-    for epoch in range(1, args.epochs + 1):
+    # --- 断点续训逻辑 ---
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"=> loading checkpoint '{args.resume}'")
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                if 'optimizer_state_dict' in checkpoint:
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if 'scheduler_state_dict' in checkpoint:
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                if 'multi_task_loss_state_dict' in checkpoint:
+                    multi_task_loss.load_state_dict(checkpoint['multi_task_loss_state_dict'])
+                if 'epoch' in checkpoint:
+                    start_epoch = checkpoint['epoch'] + 1
+                if 'best_nme' in checkpoint:
+                    best_nme = checkpoint['best_nme']
+                if 'best_acc' in checkpoint:
+                    best_acc = checkpoint['best_acc']
+                print(f"=> loaded checkpoint '{args.resume}' (epoch {checkpoint.get('epoch')})")
+            else:
+                model.load_state_dict(checkpoint)
+                print(f"=> loaded model weights '{args.resume}' (starting from epoch 1)")
+        else:
+            print(f"=> no checkpoint found at '{args.resume}'")
+
+    print(f'Starting training from epoch {start_epoch}...')
+    
+    for epoch in range(start_epoch, args.epochs + 1):
         train_loss, _, _, _ = train_one_epoch(
             model, train_loader, criterion_landmark, criterion_gender,
-            optimizer, device, epoch, args, multi_task_loss # 传入权重层
+            optimizer, device, epoch, args, multi_task_loss 
         )
 
         val_loss, val_nme, val_acc = validate(
@@ -292,18 +273,32 @@ def main():
         )
 
         scheduler.step(val_loss)
-        # 更新学习率 - 基于验证loss
-        scheduler.step(val_loss)
         
+        # 构建完整的保存状态字典
+        state = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'multi_task_loss_state_dict': multi_task_loss.state_dict(),
+            'best_nme': best_nme,
+            'best_acc': best_acc
+        }
+
         if val_nme < best_nme:
             best_nme = val_nme
-            torch.save(model.state_dict(), os.path.join(args.save_dir, 'best_nme_model.pth'))
+            state['best_nme'] = best_nme
+            torch.save(state, os.path.join(args.save_dir, 'best_nme_model.pth'))
             print(f'Saved best NME model (NME: {val_nme:.6f})')
 
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(args.save_dir, 'best_acc_model.pth'))
+            state['best_acc'] = best_acc
+            torch.save(state, os.path.join(args.save_dir, 'best_acc_model.pth'))
             print(f'Saved best Accuracy model (Acc: {val_acc:.2f}%)')
+            
+        if epoch % args.save_freq == 0:
+            torch.save(state, os.path.join(args.save_dir, f'checkpoint_epoch_{epoch}.pth'))
 
     print(f'Best NME: {best_nme:.6f}')
     print(f'Best Accuracy: {best_acc:.2f}%')
