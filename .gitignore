@@ -1,0 +1,29 @@
+# --- 机器学习/深度学习常用过滤 ---
+
+# 1. 忽略数据集 (最重要！图片太多太碎，不适合传GitHub)
+data/
+datasets/
+*.zip
+*.tar.gz
+results/
+# 2. 忽略模型权重 (文件太大)
+checkpoints/
+*.pth
+*.onnx
+*.weights
+
+# 3. 忽略 Python 环境和缓存
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# 4. 忽略 VS Code 配置
+.vscode/
+
+# 5. 忽略日志和系统文件
+*.log
+.DS_Store
+Thumbs.db
