@@ -59,7 +59,20 @@ class WingLoss(nn.Module):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Multi-Task Face Analysis Model')
-<<<<<<< HEAD
+    parser.add_argument('--data_root', type=str, default='./data')
+    parser.add_argument('--img_size', type=int, default=224)
+    parser.add_argument('--model_type', type=str, default='base')
+    parser.add_argument('--pretrained', action='store_true', default=True)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=80)
+    parser.add_argument('--lr', type=float, default=0.0005)
+    parser.add_argument('--weight_decay', type=float, default=1e-3) # 增加正则化
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--save_dir', type=str, default='./checkpoints')
+    parser.add_argument('--save_freq', type=int, default=5)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--device', type=str, default='cuda')
+    # 注意：启用自动权重后，命令行传入的 landmark_weight 将失效
 
     # 数据相关
     parser.add_argument('--data_root', type=str, default='./data',
@@ -104,22 +117,6 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use')
 
-=======
-    parser.add_argument('--data_root', type=str, default='./data')
-    parser.add_argument('--img_size', type=int, default=224)
-    parser.add_argument('--model_type', type=str, default='base')
-    parser.add_argument('--pretrained', action='store_true', default=True)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=80)
-    parser.add_argument('--lr', type=float, default=0.0005)
-    parser.add_argument('--weight_decay', type=float, default=1e-3) # 增加正则化
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--save_dir', type=str, default='./checkpoints')
-    parser.add_argument('--save_freq', type=int, default=5)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--device', type=str, default='cuda')
-    # 注意：启用自动权重后，命令行传入的 landmark_weight 将失效
->>>>>>> backup_step5
     return parser.parse_args()
 
 
@@ -159,14 +156,11 @@ def train_one_epoch(model, train_loader, criterion_landmark, criterion_gender,
 
         optimizer.zero_grad()
         loss.backward()
-<<<<<<< HEAD
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         # 梯度裁剪，防止梯度爆炸
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         
-=======
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
->>>>>>> backup_step5
         optimizer.step()
 
         _, gender_pred = torch.max(pred_gender, 1)
@@ -245,12 +239,24 @@ def main():
     print(f'Creating {args.model_type} model...')
     model = get_model(model_type=args.model_type, pretrained=args.pretrained).to(device)
 
-<<<<<<< HEAD
+    # --- 初始化自动权重层 ---
+    multi_task_loss = MultiTaskLoss().to(device)
+
+    criterion_landmark = WingLoss(w=10, epsilon=2)
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
     # 定义损失函数
     # 使用Wing Loss for关键点检测 (CVPR 2018论文方法)
     criterion_landmark = WingLoss(omega=10, epsilon=2)
     # 性别分类使用标准交叉熵，添加标签平滑防止过拟合
     criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    # --- 将自动权重层的参数加入优化器 ---
+    optimizer = optim.AdamW([
+        {'params': model.parameters()},
+        {'params': multi_task_loss.parameters(), 'lr': args.lr * 5} # 让权重参数学习得快一点
+    ], lr=args.lr, weight_decay=args.weight_decay)
+
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7)
 
     # 定义优化器 - 使用Adam with较小学习率
     optimizer = optim.Adam(
@@ -268,22 +274,8 @@ def main():
         patience=7,
         min_lr=1e-6
     )
-=======
-    # --- 初始化自动权重层 ---
-    multi_task_loss = MultiTaskLoss().to(device)
 
-    criterion_landmark = WingLoss(w=10, epsilon=2)
-    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
-
-    # --- 将自动权重层的参数加入优化器 ---
-    optimizer = optim.AdamW([
-        {'params': model.parameters()},
-        {'params': multi_task_loss.parameters(), 'lr': args.lr * 5} # 让权重参数学习得快一点
-    ], lr=args.lr, weight_decay=args.weight_decay)
-
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7)
->>>>>>> backup_step5
-
+    # 训练循环
     best_nme = float('inf')
     best_acc = 0.0
 
@@ -299,10 +291,8 @@ def main():
             device, args
         )
 
-<<<<<<< HEAD
+        scheduler.step(val_loss)
         # 更新学习率 - 基于验证loss
-=======
->>>>>>> backup_step5
         scheduler.step(val_loss)
         
         if val_nme < best_nme:
