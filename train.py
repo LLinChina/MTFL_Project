@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from tqdm import tqdm
 import numpy as np
 
-from model import get_model
+from model import get_model, WingLoss
 from utils import get_dataloaders, calculate_nme, AverageMeter
 
 
@@ -37,17 +37,17 @@ def parse_args():
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=80,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.0005,
+    parser.add_argument('--lr', type=float, default=0.0003,
                         help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=5e-4,
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
 
-    # 损失权重 - 增加性别分类任务的权重
-    parser.add_argument('--landmark_weight', type=float, default=0.8,
+    # 损失权重 - 根据论文经验，landmark和gender基本平衡
+    parser.add_argument('--landmark_weight', type=float, default=1.0,
                         help='Weight for landmark loss')
-    parser.add_argument('--gender_weight', type=float, default=1.5,
+    parser.add_argument('--gender_weight', type=float, default=1.0,
                         help='Weight for gender loss')
 
     # 保存相关
@@ -110,7 +110,7 @@ def train_one_epoch(model, train_loader, criterion_landmark, criterion_gender,
         loss.backward()
         
         # 梯度裁剪，防止梯度爆炸
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         
         optimizer.step()
 
@@ -223,30 +223,26 @@ def main():
     model = model.to(device)
 
     # 定义损失函数
-    criterion_landmark = nn.SmoothL1Loss()  # 使用Smooth L1代替MSE，对异常值更鲁棒
-    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)  # 添加标签平滑
+    # 使用Wing Loss for关键点检测 (CVPR 2018论文方法)
+    criterion_landmark = WingLoss(omega=10, epsilon=2)
+    # 性别分类使用标准交叉熵，添加标签平滑防止过拟合
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # 定义优化器 - 使用AdamW和更优的参数
-    optimizer = optim.AdamW(
+    # 定义优化器 - 使用Adam with较小学习率
+    optimizer = optim.Adam(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
         betas=(0.9, 0.999)
     )
 
-    # 组合学习率调度器：先用余弦退火，再用ReduceLROnPlateau微调
-    scheduler_cosine = CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs,
-        eta_min=args.lr * 0.01
-    )
-    
-    scheduler_plateau = ReduceLROnPlateau(
+    # 学习率调度器 - 使用ReduceLROnPlateau
+    scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
         factor=0.5,
-        patience=5,
-        min_lr=1e-7
+        patience=7,
+        min_lr=1e-6
     )
 
     # 训练循环
@@ -267,11 +263,8 @@ def main():
             device, args
         )
 
-        # 更新学习率 - 前30个epoch用余弦退火，之后用plateau
-        if epoch <= 30:
-            scheduler_cosine.step()
-        else:
-            scheduler_plateau.step(val_loss)
+        # 更新学习率 - 基于验证loss
+        scheduler.step(val_loss)
         
         # 打印当前学习率
         current_lr = optimizer.param_groups[0]['lr']

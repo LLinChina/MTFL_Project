@@ -9,6 +9,30 @@ import torch.nn.functional as F
 from torchvision import models
 
 
+class WingLoss(nn.Module):
+    """
+    Wing Loss for robust facial landmark detection
+    论文: Wing Loss for Robust Facial Landmark Localisation with Convolutional Neural Networks (CVPR 2018)
+    """
+    def __init__(self, omega=10, epsilon=2):
+        super(WingLoss, self).__init__()
+        self.omega = omega
+        self.epsilon = epsilon
+        self.C = self.omega - self.omega * torch.log(torch.tensor(1.0 + self.omega / self.epsilon))
+
+    def forward(self, pred, target):
+        diff = torch.abs(pred - target)
+        
+        # Wing loss分段函数
+        loss = torch.where(
+            diff < self.omega,
+            self.omega * torch.log(1 + diff / self.epsilon),
+            diff - self.C
+        )
+        
+        return loss.mean()
+
+
 class MultiTaskFaceNet(nn.Module):
     """
     多任务人脸分析网络
@@ -30,29 +54,22 @@ class MultiTaskFaceNet(nn.Module):
         feature_dim = 512
 
         # 关键点检测分支 (5个点，每个点2个坐标，共10个输出)
+        # 使用较深的网络，但dropout适中
         self.landmark_head = nn.Sequential(
             nn.Linear(feature_dim, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(0.3),
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.4),
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(128, 10)  # 5个关键点 × 2个坐标
+            nn.Dropout(0.2),
+            nn.Linear(256, 10)  # 5个关键点 × 2个坐标
         )
 
         # 性别分类分支 (二分类：Male/Female)
         self.gender_head = nn.Sequential(
-            nn.Linear(feature_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(512, 256),
+            nn.Linear(feature_dim, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.4),
