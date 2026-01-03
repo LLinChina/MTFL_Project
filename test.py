@@ -26,9 +26,9 @@ def parse_args():
                         help='Input image size')
 
     # 模型相关
-    parser.add_argument('--model_path', type=str, default='./checkpoints/No6/best_nme_model.pth',
+    parser.add_argument('--model_path', type=str, default='./checkpoints/No7/best_acc_model.pth',
                         help='Path to trained model checkpoint')
-    parser.add_argument('--model_type', type=str, default='base',
+    parser.add_argument('--model_type', type=str, default='improved',
                         choices=['base', 'improved'],
                         help='Model architecture type')
 

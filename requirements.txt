@@ -1,0 +1,14 @@
+# 核心依赖（用于运行/训练/测试）
+# 注：torch/torchvision 的 CUDA 版本请按你的显卡与CUDA自行选择安装源。
+
+torch>=2.0.0
+torchvision>=0.15.0
+
+numpy>=1.24.0
+opencv-python>=4.8.0
+matplotlib>=3.7.0
+Pillow>=10.0.0
+
+tqdm>=4.65.0
+scikit-learn>=1.3.0
+seaborn>=0.13.0
